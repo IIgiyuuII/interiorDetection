@@ -197,7 +197,7 @@ class MainActivity : AppCompatActivity(), Detector.DetectorListener {
 
     override fun onDetect(boundingBoxes: List<BoundingBox>, inferenceTime: Long) {
         runOnUiThread {
-            binding.inferenceTime.text = "${inferenceTime}ms"
+            binding.inferenceTime.text = "${inferenceTime}ms (модель ${"%.1f".format(detector?.modelTimeMs ?: 0.0)}ms)"
             binding.overlay.apply {
                 setResults(boundingBoxes)
                 invalidate()

@@ -3,6 +3,8 @@ package com.surendramaran.yolov8tflite
 import android.content.Context
 import android.graphics.Bitmap
 import android.os.SystemClock
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import com.surendramaran.yolov8tflite.MetaData.extractNamesFromLabelFile
 import com.surendramaran.yolov8tflite.MetaData.extractNamesFromMetadata
 import org.tensorflow.lite.DataType
@@ -31,6 +33,12 @@ class Detector(
     private var tensorHeight = 0
     private var numChannel = 0
     private var numElements = 0
+    private var channelFirst = false
+
+    // Время только вызова interpreter.run, мс (для профилирования в лабе)
+    @Volatile
+    var modelTimeMs = 0.0
+        private set
 
     private val imageProcessor = ImageProcessor.Builder()
         .add(NormalizeOp(INPUT_MEAN, INPUT_STANDARD_DEVIATION))
@@ -66,13 +74,14 @@ class Detector(
         }
 
         if (inputShape != null) {
-            tensorWidth = inputShape[1]
-            tensorHeight = inputShape[2]
+            tensorHeight = inputShape[1]
+            tensorWidth = inputShape[2]
 
-            // If in case input shape is in format of [1, 3, ..., ...]
+            // Формат входа [1, 3, H, W] (так экспортирует наша YOLO26)
             if (inputShape[1] == 3) {
-                tensorWidth = inputShape[2]
-                tensorHeight = inputShape[3]
+                channelFirst = true
+                tensorHeight = inputShape[2]
+                tensorWidth = inputShape[3]
             }
         }
 
@@ -112,16 +121,21 @@ class Detector(
 
         val resizedBitmap = Bitmap.createScaledBitmap(frame, tensorWidth, tensorHeight, false)
 
-        val tensorImage = TensorImage(INPUT_IMAGE_TYPE)
-        tensorImage.load(resizedBitmap)
-        val processedImage = imageProcessor.process(tensorImage)
-        val imageBuffer = processedImage.buffer
+        val imageBuffer: ByteBuffer = if (channelFirst) {
+            bitmapToChw(resizedBitmap)
+        } else {
+            val tensorImage = TensorImage(INPUT_IMAGE_TYPE)
+            tensorImage.load(resizedBitmap)
+            imageProcessor.process(tensorImage).buffer
+        }
 
         println("numChannel: $numChannel")
         println("numElements: $numElements")
 
         val output = TensorBuffer.createFixedSize(intArrayOf(1, numChannel, numElements), OUTPUT_IMAGE_TYPE)
+        val modelStart = SystemClock.elapsedRealtimeNanos()
         interpreter.run(imageBuffer, output.buffer)
+        modelTimeMs = (SystemClock.elapsedRealtimeNanos() - modelStart) / 1_000_000.0
 
         val bestBoxes = bestBox(output.floatArray)
         inferenceTime = SystemClock.uptimeMillis() - inferenceTime
@@ -132,6 +146,26 @@ class Detector(
         }
 
         detectorListener.onDetect(bestBoxes, inferenceTime)
+    }
+
+    // Bitmap (ARGB) -> float32 [1, 3, H, W], значения 0..1, порядок каналов RGB
+    private fun bitmapToChw(bmp: Bitmap): ByteBuffer {
+        val w = tensorWidth
+        val h = tensorHeight
+        val plane = w * h
+        val pixels = IntArray(plane)
+        bmp.getPixels(pixels, 0, w, 0, 0, w, h)
+        val data = FloatArray(3 * plane)
+        for (i in 0 until plane) {
+            val p = pixels[i]
+            data[i] = ((p shr 16) and 0xFF) / 255f
+            data[plane + i] = ((p shr 8) and 0xFF) / 255f
+            data[2 * plane + i] = (p and 0xFF) / 255f
+        }
+        val buf = ByteBuffer.allocateDirect(4 * data.size).order(ByteOrder.nativeOrder())
+        buf.asFloatBuffer().put(data)
+        buf.rewind()
+        return buf
     }
 
     private fun bestBox(array: FloatArray) : List<BoundingBox>? {
