@@ -1,4 +1,4 @@
-package com.surendramaran.yolov10objectdetector
+package com.surendramaran.yolov8tflite
 
 import android.content.Context
 import org.tensorflow.lite.support.metadata.MetadataExtractor

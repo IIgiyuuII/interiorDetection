@@ -1,12 +1,6 @@
 pluginManagement {
     repositories {
-        google {
-            content {
-                includeGroupByRegex("com\\.android.*")
-                includeGroupByRegex("com\\.google.*")
-                includeGroupByRegex("androidx.*")
-            }
-        }
+        google()
         mavenCentral()
         gradlePluginPortal()
     }
@@ -19,6 +13,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "YOLOv10 Object Detector"
+rootProject.name = "YOLOv8 TfLite"
 include(":app")
- 

@@ -1,10 +1,10 @@
-package com.surendramaran.yolov10objectdetector
+package com.surendramaran.yolov8tflite
 
 import android.content.Context
 import android.graphics.Bitmap
 import android.os.SystemClock
-import com.surendramaran.yolov10objectdetector.MetaData.extractNamesFromLabelFile
-import com.surendramaran.yolov10objectdetector.MetaData.extractNamesFromMetadata
+import com.surendramaran.yolov8tflite.MetaData.extractNamesFromLabelFile
+import com.surendramaran.yolov8tflite.MetaData.extractNamesFromMetadata
 import org.tensorflow.lite.DataType
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.gpu.CompatibilityList
@@ -23,6 +23,7 @@ class Detector(
     private val detectorListener: DetectorListener,
     private val message: (String) -> Unit
 ) {
+
     private var interpreter: Interpreter
     private var labels = mutableListOf<String>()
 
@@ -37,12 +38,22 @@ class Detector(
         .build()
 
     init {
+        val compatList = CompatibilityList()
+
         val options = Interpreter.Options().apply{
-            this.setNumThreads(4)
+            if(compatList.isDelegateSupportedOnThisDevice){
+                val delegateOptions = compatList.bestOptionsForThisDevice
+                this.addDelegate(GpuDelegate(delegateOptions))
+            } else {
+                this.setNumThreads(4)
+            }
         }
 
         val model = FileUtil.loadMappedFile(context, modelPath)
         interpreter = Interpreter(model, options)
+
+        val inputShape = interpreter.getInputTensor(0)?.shape()
+        val outputShape = interpreter.getOutputTensor(0)?.shape()
 
         labels.addAll(extractNamesFromMetadata(model))
         if (labels.isEmpty()) {
@@ -53,11 +64,6 @@ class Detector(
                 labels.addAll(extractNamesFromLabelFile(context, labelPath))
             }
         }
-
-        labels.forEach(::println)
-
-        val inputShape = interpreter.getInputTensor(0)?.shape()
-        val outputShape = interpreter.getOutputTensor(0)?.shape()
 
         if (inputShape != null) {
             tensorWidth = inputShape[1]
@@ -71,28 +77,17 @@ class Detector(
         }
 
         if (outputShape != null) {
-            numElements = outputShape[1]
-            numChannel = outputShape[2]
+            numChannel = outputShape[1]
+            numElements = outputShape[2]
         }
     }
 
     fun restart(isGpu: Boolean) {
         interpreter.close()
 
-        val options = if (isGpu) {
-            val compatList = CompatibilityList()
-            Interpreter.Options().apply{
-                if(compatList.isDelegateSupportedOnThisDevice){
-                    val delegateOptions = compatList.bestOptionsForThisDevice
-                    this.addDelegate(GpuDelegate(delegateOptions))
-                } else {
-                    this.setNumThreads(4)
-                }
-            }
-        } else {
-            Interpreter.Options().apply{
-                this.setNumThreads(4)
-            }
+        val options = Interpreter.Options().apply {
+            numThreads = 4
+            useXNNPACK = true
         }
 
         val model = FileUtil.loadMappedFile(context, modelPath)
@@ -107,9 +102,13 @@ class Detector(
         if (tensorWidth == 0
             || tensorHeight == 0
             || numChannel == 0
-            || numElements == 0) return
+            || numElements == 0) {
+            return
+        }
 
         var inferenceTime = SystemClock.uptimeMillis()
+
+
 
         val resizedBitmap = Bitmap.createScaledBitmap(frame, tensorWidth, tensorHeight, false)
 
@@ -118,13 +117,16 @@ class Detector(
         val processedImage = imageProcessor.process(tensorImage)
         val imageBuffer = processedImage.buffer
 
+        println("numChannel: $numChannel")
+        println("numElements: $numElements")
+
         val output = TensorBuffer.createFixedSize(intArrayOf(1, numChannel, numElements), OUTPUT_IMAGE_TYPE)
         interpreter.run(imageBuffer, output.buffer)
 
         val bestBoxes = bestBox(output.floatArray)
         inferenceTime = SystemClock.uptimeMillis() - inferenceTime
 
-        if (bestBoxes.isEmpty()) {
+        if (bestBoxes == null) {
             detectorListener.onEmptyDetect()
             return
         }
@@ -132,26 +134,85 @@ class Detector(
         detectorListener.onDetect(bestBoxes, inferenceTime)
     }
 
-    private fun bestBox(array: FloatArray) : List<BoundingBox> {
+    private fun bestBox(array: FloatArray) : List<BoundingBox>? {
+
         val boundingBoxes = mutableListOf<BoundingBox>()
-        for (r in 0 until numElements) {
-            val cnf = array[r * numChannel + 4]
-            if (cnf > CONFIDENCE_THRESHOLD) {
-                val x1 = array[r * numChannel]
-                val y1 = array[r * numChannel + 1]
-                val x2 = array[r * numChannel + 2]
-                val y2 = array[r * numChannel + 3]
-                val cls = array[r * numChannel + 5].toInt()
-                val clsName = labels[cls]
+
+        for (c in 0 until numElements) {
+            var maxConf = CONFIDENCE_THRESHOLD
+            var maxIdx = -1
+            var j = 4
+            var arrayIdx = c + numElements * j
+            while (j < numChannel){
+                if (array[arrayIdx] > maxConf) {
+                    maxConf = array[arrayIdx]
+                    maxIdx = j - 4
+                }
+                j++
+                arrayIdx += numElements
+            }
+
+            if (maxConf > CONFIDENCE_THRESHOLD) {
+                val clsName = labels[maxIdx]
+                val cx = array[c] // 0
+                val cy = array[c + numElements] // 1
+                val w = array[c + numElements * 2]
+                val h = array[c + numElements * 3]
+                val x1 = cx - (w/2F)
+                val y1 = cy - (h/2F)
+                val x2 = cx + (w/2F)
+                val y2 = cy + (h/2F)
+                if (x1 < 0F || x1 > 1F) continue
+                if (y1 < 0F || y1 > 1F) continue
+                if (x2 < 0F || x2 > 1F) continue
+                if (y2 < 0F || y2 > 1F) continue
+
                 boundingBoxes.add(
                     BoundingBox(
                         x1 = x1, y1 = y1, x2 = x2, y2 = y2,
-                        cnf = cnf, cls = cls, clsName = clsName
+                        cx = cx, cy = cy, w = w, h = h,
+                        cnf = maxConf, cls = maxIdx, clsName = clsName
                     )
                 )
             }
         }
-        return boundingBoxes
+
+        if (boundingBoxes.isEmpty()) return null
+
+        return applyNMS(boundingBoxes)
+    }
+
+    private fun applyNMS(boxes: List<BoundingBox>) : MutableList<BoundingBox> {
+        val sortedBoxes = boxes.sortedByDescending { it.cnf }.toMutableList()
+        val selectedBoxes = mutableListOf<BoundingBox>()
+
+        while(sortedBoxes.isNotEmpty()) {
+            val first = sortedBoxes.first()
+            selectedBoxes.add(first)
+            sortedBoxes.remove(first)
+
+            val iterator = sortedBoxes.iterator()
+            while (iterator.hasNext()) {
+                val nextBox = iterator.next()
+                val iou = calculateIoU(first, nextBox)
+                if (iou >= IOU_THRESHOLD) {
+                    iterator.remove()
+                }
+            }
+        }
+
+        return selectedBoxes
+    }
+
+    private fun calculateIoU(box1: BoundingBox, box2: BoundingBox): Float {
+        val x1 = maxOf(box1.x1, box2.x1)
+        val y1 = maxOf(box1.y1, box2.y1)
+        val x2 = minOf(box1.x2, box2.x2)
+        val y2 = minOf(box1.y2, box2.y2)
+        val intersectionArea = maxOf(0F, x2 - x1) * maxOf(0F, y2 - y1)
+        val box1Area = box1.w * box1.h
+        val box2Area = box2.w * box2.h
+        return intersectionArea / (box1Area + box2Area - intersectionArea)
     }
 
     interface DetectorListener {
@@ -165,5 +226,6 @@ class Detector(
         private val INPUT_IMAGE_TYPE = DataType.FLOAT32
         private val OUTPUT_IMAGE_TYPE = DataType.FLOAT32
         private const val CONFIDENCE_THRESHOLD = 0.3F
+        private const val IOU_THRESHOLD = 0.5F
     }
 }
