@@ -1,0 +1,12 @@
+runs/
+__pycache__/
+*.zip
+dataset/
+furny*/
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+*.iml

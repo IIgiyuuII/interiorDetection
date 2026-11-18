@@ -1,0 +1,8 @@
+.git
+android
+runs
+*.zip
+*.tflite
+*.pt
+**/build
+**/.gradle
